@@ -1,0 +1,5 @@
+{
+  "name": "RescuePath AI: Emergency Ambulance Routing",
+  "description": "AI-powered emergency route planning for ambulances using real-time location and OpenStreetMap to minimize hospital transit time.",
+  "requestFramePermissions": ["geolocation"]
+}
