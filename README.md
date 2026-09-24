@@ -1,64 +1,87 @@
-# RescuePath AI - Emergency Ambulance Routing
+#  AI-Based Emergency Ambulance Route Planning System
 
-RescuePath AI is a full-stack web application designed to optimize and route emergency ambulances in real-time. It provides a real-time tracking interface, robust hospital routing logic, and features to streamline emergency response workflows.
+An intelligent web-based emergency ambulance routing system designed to reduce ambulance response delays by combining **GPS/location support, emergency reporting, route optimization, simulated traffic conditions, and hospital resource-based selection**.
 
-## Features
+The system helps ambulance drivers and emergency dispatchers identify suitable hospitals and routes based on the emergency type, location, distance, traffic conditions, and simulated hospital availability.
 
-- **Real-time Ambulance Tracking**: Live tracking of ambulance locations using Socket.IO.
-- **Emergency Routing**: Automated routing from emergency locations to suitable hospitals.
-- **Map Interface**: Interactive map visualization built with React Leaflet.
-- **Authentication**: Secure driver registration and login system.
-- **SQLite Database**: Local database for managing users, ambulances, emergencies, and routes.
-- **Responsive UI**: Modern interface styled with Tailwind CSS.
 
-## Tech Stack
+##  Project Overview
 
-- **Frontend**: React, Vite, Tailwind CSS, React Leaflet, Lucide React, Framer Motion
-- **Backend**: Node.js, Express, Socket.IO
-- **Database**: SQLite (better-sqlite3)
-- **Language**: TypeScript / JavaScript
+During medical emergencies, ambulance delays can occur due to:
 
-## Prerequisites
+- Traffic congestion
+- Poor route selection
+- Lack of information about nearby hospitals
+- Difficulty communicating emergency details
+- Unavailability of suitable hospital resources
 
-- Node.js (v18 or higher recommended)
-- npm (Node Package Manager)
+This project provides a centralized web-based solution where an ambulance driver can:
 
-## Getting Started
+1. Report an emergency.
+2. Select the emergency type and severity.
+3. Use GPS/location information.
+4. View suitable hospitals.
+5. Calculate optimized routes.
+6. Consider simulated traffic conditions.
+7. Consider simulated hospital resources.
+8. Receive route and hospital recommendations.
+9. Use voice input for emergency reporting.
 
-1. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+The system is designed as a **prototype/simulation for academic and research purposes**.
 
-2. **Environment Variables:**
-   Create a `.env` or `.env.local` file in the root directory if you need to override any defaults.
-   Example:
-   ```env
-   PORT=3002
-   DB_NAME=driverdb
-   ```
 
-3. **Start the development server:**
-   ```bash
-   npm run dev
-   ```
-   *Note: This command runs both the Express backend and the Vite frontend simultaneously using Vite middleware.*
 
-4. **Access the application:**
-   Open your browser and navigate to `http://localhost:3002`.
+##  Objectives
 
-## Database Schema
+- Reduce ambulance travel delays.
+- Provide optimized emergency routes.
+- Help drivers quickly report emergencies.
+- Reduce dependency on typing during emergencies.
+- Consider traffic conditions during route selection.
+- Select hospitals based on emergency requirements.
+- Provide a simple and driver-friendly interface.
+- Demonstrate intelligent decision-making for emergency ambulance routing.
 
-The application automatically creates the SQLite database (`driverdb.sqlite`) and initializes the following tables on startup:
-- `users`: Driver authentication and details
-- `ambulances`: Ambulance details and real-time status/location
-- `emergencies`: Emergency request information
-- `routes`: Computed routes and metadata
 
-## Scripts
 
-- `npm run dev`: Starts the development server with hot-module replacement.
-- `npm run build`: Builds the application for production.
-- `npm run preview`: Locally preview the production build.
-- `npm run clean`: Removes the `dist` directory.
-- `npm run lint`: Runs TypeScript compilation check.
+##  Key Features
+
+### Emergency Reporting
+
+Drivers can quickly report an emergency using predefined emergency types such as:
+
+- Accident
+- Heart Attack
+- Stroke
+- Breathing Difficulty
+- Heat Stroke
+- Unconscious Person
+- Snake Bite
+- Poisoning
+- Severe Burns
+- Other
+
+The system also supports severity levels:
+
+- Critical
+- High
+- Moderate
+- Low
+
+This reduces the need for typing during emergency situations.
+
+
+
+###  Voice Emergency Input
+
+The system supports browser-based voice input using the **Web Speech API**.
+
+Drivers can speak simple or imperfect English phrases, for example:
+
+```text
+"heart pain"
+"accident happened"
+"not breathing"
+"he got stroke"
+"snake bite"
+"breathing problem"
