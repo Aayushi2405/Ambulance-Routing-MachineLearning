@@ -21,15 +21,19 @@ import {
   LogOut,
   Mail,
   Plus,
-  Ambulance
+  Ambulance,
+  X,
+  CheckCircle2,
+  Mic
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import MapComponent from "./components/MapComponent";
 import Login from "./components/Login";
 import Register from "./components/Register";
+import polyline from "@mapbox/polyline";
 import { fetchNearbyHospitals } from "./services/hospitalService";
-import { getRoute } from "./services/routingService";
-import { Hospital, AmbulanceState, RouteInfo } from "./types";
+import { getRoute, calculateBearing } from "./services/routingService";
+import { Hospital, AmbulanceState, RouteInfo, OptimizationResult, HospitalScore } from "./types";
 import { cn } from "./lib/utils";
 
 const EMERGENCY_TYPES = [
@@ -59,6 +63,7 @@ export default function App() {
   const [aiAnalysis, setAiAnalysis] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSimulating, setIsSimulating] = useState(false);
+  const [simSpeed, setSimSpeed] = useState<1 | 2 | 4>(1);
   const [trafficMode, setTrafficMode] = useState<'Light' | 'Moderate' | 'Heavy' | 'Dynamic'>('Dynamic');
   const [locationStatus, setLocationStatus] = useState<'finding' | 'gps' | 'fallback'>('finding');
   const [locationErrorMessage, setLocationErrorMessage] = useState<string | null>(null);
@@ -74,11 +79,363 @@ export default function App() {
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [isConfirmed, setIsConfirmed] = useState(false);
   const [customEmergencyTypes, setCustomEmergencyTypes] = useState<any[]>([]);
-  const [reportText, setReportText] = useState("");
+  const [reportType, setReportType] = useState("Accident");
+  const [reportTitle, setReportTitle] = useState("");
+  const [reportLocation, setReportLocation] = useState("");
+  const [patientName, setPatientName] = useState("");
+  const [severity, setSeverity] = useState<'Critical' | 'High' | 'Moderate' | 'Low'>('High');
+  const [reportNotes, setReportNotes] = useState("");
+  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [reportSuccessMessage, setReportSuccessMessage] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [isListeningContext, setIsListeningContext] = useState(false);
+  const [contextSpeechError, setContextSpeechError] = useState<string | null>(null);
+
   const [evaluatingHospitalId, setEvaluatingHospitalId] = useState<string | null>(null);
   const [hasAutoSelected, setHasAutoSelected] = useState(false);
 
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  // Fetch initial emergency reports from backend
+  useEffect(() => {
+    const fetchEmergencies = async () => {
+      try {
+        const res = await fetch("/api/emergencies");
+        const data = await res.json();
+        if (data.success && Array.isArray(data.emergencies)) {
+          const loadedTypes = data.emergencies.map((em: any) => ({
+            id: `db-${em.id}`,
+            label: em.title,
+            icon: <Activity className="w-4 h-4" />,
+            color: em.severity === 'Critical' ? "bg-red-100 text-red-700 border-red-200" : "bg-blue-100 text-blue-700 border-blue-200",
+            isCustom: true,
+            severity: em.severity,
+            patientName: em.patient_name,
+            notes: em.notes
+          }));
+          setCustomEmergencyTypes(loadedTypes);
+        }
+      } catch (err) {
+        console.error("Failed to load existing emergency reports:", err);
+      }
+    };
+    fetchEmergencies();
+  }, []);
+
+  const handleEmergencyReportSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reportType.trim() || !reportTitle.trim() || !reportLocation.trim()) {
+      setReportError("Please fill in all required fields (Emergency Type, Title, and Location).");
+      return;
+    }
+    setReportError(null);
+    setIsSubmittingReport(true);
+
+    const myAmbulanceLoc = ambulances.find(a => a.id === myId) || ambulances[0];
+
+    try {
+      const response = await fetch("/api/emergencies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: `[${reportType}] ${reportTitle.trim()}`,
+          patientName: `Location: ${reportLocation.trim()}`,
+          severity,
+          locationLat: myAmbulanceLoc?.lat,
+          locationLng: myAmbulanceLoc?.lng,
+          notes: reportNotes.trim() || undefined
+        })
+      });
+
+      const data = await response.json();
+      if (data.success && data.emergency) {
+        const created = data.emergency;
+        const newType = {
+          id: `db-${created.id}`,
+          label: created.title,
+          icon: <Activity className="w-4 h-4" />,
+          color: created.severity === 'Critical' ? "bg-red-100 text-red-700 border-red-200" : "bg-blue-100 text-blue-700 border-blue-200",
+          isCustom: true,
+          severity: created.severity,
+          patientName: created.patient_name,
+          notes: created.notes
+        };
+
+        setCustomEmergencyTypes(prev => {
+          if (prev.some(t => t.id === newType.id)) return prev;
+          return [newType, ...prev];
+        });
+        setEmergencyType(newType.id);
+        setReportSuccessMessage("Emergency case reported successfully!");
+        setTimeout(() => {
+          setIsReportModalOpen(false);
+          setReportSuccessMessage(null);
+        }, 1500);
+      } else {
+        setReportError(data.message || "Failed to submit emergency report.");
+      }
+    } catch (err) {
+      setReportError("Network error. Could not connect to dispatch server.");
+    } finally {
+      setIsSubmittingReport(false);
+    }
+  };
+
+  const [isDispatching, setIsDispatching] = useState(false);
+  const [dispatchSuccessMessage, setDispatchSuccessMessage] = useState<string | null>(null);
+
+  const handleVoiceInputContext = () => {
+    const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognitionAPI) {
+      setContextSpeechError("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognitionAPI();
+      recognition.lang = "en-US";
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      setIsListeningContext(true);
+      setContextSpeechError(null);
+
+      recognition.onresult = (event: any) => {
+        setIsListeningContext(false);
+        const transcript = (event.results?.[0]?.[0]?.transcript || "").toLowerCase();
+
+        let matchedId = "other";
+        if (
+          transcript.includes("heart") ||
+          transcript.includes("cardiac") ||
+          transcript.includes("heart pain") ||
+          transcript.includes("chest pain") ||
+          transcript.includes("heart attack")
+        ) {
+          matchedId = "cardiac";
+        } else if (
+          transcript.includes("accident") ||
+          transcript.includes("trauma") ||
+          transcript.includes("crash") ||
+          transcript.includes("collision") ||
+          transcript.includes("hit by")
+        ) {
+          matchedId = "trauma";
+        } else if (
+          transcript.includes("snake") ||
+          transcript.includes("bite")
+        ) {
+          matchedId = "snakebite";
+        } else if (
+          transcript.includes("poison") ||
+          transcript.includes("toxic")
+        ) {
+          matchedId = "poison";
+        } else if (
+          transcript.includes("burn") ||
+          transcript.includes("fire")
+        ) {
+          matchedId = "burns";
+        } else if (
+          transcript.includes("stroke") ||
+          transcript.includes("paralysis") ||
+          transcript.includes("got stroke")
+        ) {
+          matchedId = "stroke";
+        } else {
+          const allTypes = [...EMERGENCY_TYPES, ...customEmergencyTypes];
+          const found = allTypes.find(t => transcript.includes(t.label.toLowerCase()));
+          if (found) matchedId = found.id;
+        }
+
+        setEmergencyType(matchedId);
+      };
+
+      recognition.onerror = (event: any) => {
+        setIsListeningContext(false);
+        if (event.error === 'no-speech') {
+          setContextSpeechError("No speech detected. Please try again.");
+        } else if (event.error === 'not-allowed') {
+          setContextSpeechError("Microphone permission denied.");
+        } else {
+          setContextSpeechError(`Speech error: ${event.error}`);
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListeningContext(false);
+      };
+
+      recognition.start();
+    } catch (err) {
+      setIsListeningContext(false);
+      setContextSpeechError("Speech recognition could not be started.");
+    }
+  };
+
+  const handleVoiceInput = () => {
+    const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognitionAPI) {
+      setReportError("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognitionAPI();
+      recognition.lang = "en-US";
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      setIsListening(true);
+      setReportError(null);
+
+      recognition.onresult = (event: any) => {
+        setIsListening(false);
+        const transcript = (event.results?.[0]?.[0]?.transcript || "").toLowerCase();
+
+        let matched = "Other";
+        if (
+          transcript.includes("heat") ||
+          transcript.includes("sunstroke") ||
+          transcript.includes("sun stroke") ||
+          transcript.includes("too hot") ||
+          transcript.includes("heat problem")
+        ) {
+          matched = "Heat Stroke";
+        } else if (
+          transcript.includes("heart") ||
+          transcript.includes("chest pain") ||
+          transcript.includes("cardiac") ||
+          transcript.includes("heart pain") ||
+          transcript.includes("heart attack") ||
+          transcript.includes("heart hurt")
+        ) {
+          matched = "Heart Attack";
+        } else if (
+          transcript.includes("stroke") ||
+          transcript.includes("paralysis") ||
+          transcript.includes("paralyzed") ||
+          transcript.includes("got stroke")
+        ) {
+          matched = "Stroke";
+        } else if (
+          transcript.includes("accident") ||
+          transcript.includes("crash") ||
+          transcript.includes("collision") ||
+          transcript.includes("hit by") ||
+          transcript.includes("vehicle")
+        ) {
+          matched = "Accident";
+        } else if (
+          transcript.includes("unconscious") ||
+          transcript.includes("faint") ||
+          transcript.includes("passed out") ||
+          transcript.includes("not waking up") ||
+          transcript.includes("unresponsive") ||
+          transcript.includes("collapsed")
+        ) {
+          matched = "Unconscious Person";
+        } else if (
+          transcript.includes("breath") ||
+          transcript.includes("suffocat") ||
+          transcript.includes("chok") ||
+          transcript.includes("gasp") ||
+          transcript.includes("cannot breathe") ||
+          transcript.includes("cant breathe") ||
+          transcript.includes("not breathing") ||
+          transcript.includes("breathing problem") ||
+          transcript.includes("shortness of breath")
+        ) {
+          matched = "Breathing Difficulty";
+        } else {
+          const options = ["Accident", "Heart Attack", "Stroke", "Breathing Difficulty", "Heat Stroke", "Unconscious Person"];
+          const found = options.find(opt => transcript.includes(opt.toLowerCase()));
+          if (found) matched = found;
+        }
+
+        setReportType(matched);
+        setReportTitle(`${matched} Incident`);
+      };
+
+      recognition.onerror = (event: any) => {
+        setIsListening(false);
+        if (event.error === 'no-speech') {
+          setReportError("No speech detected. Please try again.");
+        } else if (event.error === 'not-allowed') {
+          setReportError("Microphone permission denied.");
+        } else {
+          setReportError(`Speech recognition error: ${event.error}`);
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognition.start();
+    } catch (err) {
+      setIsListening(false);
+      setReportError("Speech recognition could not be started.");
+    }
+  };
+
+  const handleOpenReportModal = () => {
+    const amb = ambulances.find(a => a.id === myId) || ambulances[0];
+    const locStr = amb ? `${amb.lat.toFixed(4)}, ${amb.lng.toFixed(4)}` : "18.2028, 83.6889";
+    setReportType("Accident");
+    setReportTitle("Accident Incident");
+    setReportLocation(`Current Location (${locStr})`);
+    setPatientName("");
+    setSeverity("High");
+    setReportNotes("");
+    setReportError(null);
+    setReportSuccessMessage(null);
+    setIsListening(false);
+    setIsReportModalOpen(true);
+  };
+
+  const handleDirectDispatch = async () => {
+    if (!route || !selectedHospital) return;
+
+    if (isConfirmed) {
+      setIsConfirmed(false);
+      setDispatchSuccessMessage(null);
+      return;
+    }
+
+    setIsDispatching(true);
+    setIsConfirmed(true);
+
+    const dbEmergencyId = emergencyType.startsWith('db-') 
+      ? parseInt(emergencyType.replace('db-', ''), 10) 
+      : null;
+
+    try {
+      const response = await fetch('/api/routes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          emergencyId: dbEmergencyId,
+          ambulanceId: myAmbulance?.id || null,
+          polyline: route.geometry,
+          distance: route.distance,
+          duration: route.duration
+        })
+      });
+      const data = await response.json();
+      if (data.success) {
+        setDispatchSuccessMessage(`Unit dispatched to ${selectedHospital.name}! ETA: ${Math.round(route.duration / 60)} min.`);
+      }
+    } catch (err) {
+      console.error("Failed to persist dispatch route to backend:", err);
+    } finally {
+      setIsDispatching(false);
+    }
+  };
+
 
   const persistSession = (token: string, name: string, license: string) => {
     localStorage.setItem('rescuepathSessionId', token);
@@ -186,14 +543,31 @@ export default function App() {
       setAmbulances(prev => prev.filter(a => a.id !== id));
     });
 
+    newSocket.on("emergency:created", (newEm: any) => {
+      const formattedType = {
+        id: `db-${newEm.id}`,
+        label: newEm.title,
+        icon: <Activity className="w-4 h-4" />,
+        color: newEm.severity === 'Critical' ? "bg-red-100 text-red-700 border-red-200" : "bg-blue-100 text-blue-700 border-blue-200",
+        isCustom: true,
+        severity: newEm.severity,
+        patientName: newEm.patient_name,
+        notes: newEm.notes
+      };
+      setCustomEmergencyTypes(prev => {
+        if (prev.some(t => t.id === formattedType.id)) return prev;
+        return [formattedType, ...prev];
+      });
+    });
+
     return () => {
       newSocket.disconnect();
     };
   }, []);
 
+
   // Get initial location and start tracking
   useEffect(() => {
-    // Load hospitals immediately for the hardcoded Ranasthalam starting location
     if (hospitals.length === 0) {
       loadHospitals(18.20278, 83.68889);
     }
@@ -205,9 +579,11 @@ export default function App() {
       const heading = pos.coords.heading;
       
       setLocationStatus('gps');
-      // ...
+      setLocationErrorMessage(null);
+
+      const targetId = myId || socket?.id || "local";
       const newState: AmbulanceState = { 
-        id: socket?.id || "local",
+        id: targetId,
         lat, 
         lng, 
         heading: heading || 0,
@@ -215,10 +591,9 @@ export default function App() {
       };
       
       setAmbulances(prev => {
-        const index = prev.findIndex(a => a.id === newState.id);
+        const index = prev.findIndex(a => a.id === targetId || a.id === "local");
         const newAmbs = [...prev];
         if (index !== -1) {
-          // Keep old heading if new one is null/NaN (often happens when stationary)
           const oldHeading = prev[index].heading;
           newState.heading = (heading !== null && !isNaN(heading as number)) ? heading : oldHeading;
           newAmbs[index] = newState;
@@ -232,12 +607,12 @@ export default function App() {
         socket.emit("ambulance:update", newState);
       }
 
-      // Reload hospitals only if moved more than 1km or if 5 mins passed
+      // Reload hospitals if moved more than 1km
       const now = Date.now();
       const shouldReload = !lastFetchPos.current || 
         Math.abs(lastFetchPos.current.lat - lat) > 0.01 || 
         Math.abs(lastFetchPos.current.lng - lng) > 0.01 ||
-        (hospitals.length === 0 && now - lastFetchTime.current > 10000); // Retry every 10s if empty
+        (hospitals.length === 0 && now - lastFetchTime.current > 10000);
 
       if (shouldReload) {
         lastFetchPos.current = { lat, lng };
@@ -248,23 +623,23 @@ export default function App() {
 
     const handleLocationError = async (err: any) => {
       console.warn("Geolocation watch error:", err);
+      setLocationStatus('fallback');
       if (err && err.code) {
         if (err.code === 1) {
-          setLocationErrorMessage("Location permission denied. Using IP-based fallback.");
+          setLocationErrorMessage("GPS permission denied. Using station location fallback.");
         } else if (err.code === 2) {
-          setLocationErrorMessage("Location unavailable. Using IP-based fallback.");
+          setLocationErrorMessage("GPS position unavailable. Using station location fallback.");
         } else if (err.code === 3) {
-          setLocationErrorMessage("Location request timed out. Using IP-based fallback.");
+          setLocationErrorMessage("GPS request timed out. Using station location fallback.");
         }
       }
-      // If GPS fails completely, we will not fake an IP location since it's inaccurate.
-      // We leave the ambulances array empty or let the user drag their location manually.
-      if (ambulances.length === 0) {
-        setLocationErrorMessage("Forced Srikakulam/Ranasthalam location to bypass inaccurate browser GPS.");
-        let fallbackState = { id: "local", lat: 18.20278, lng: 83.68889, heading: 0 }; 
-        setAmbulances([fallbackState]);
-        loadHospitals(fallbackState.lat, fallbackState.lng);
-      }
+
+      setAmbulances(prev => {
+        if (prev.length > 0) return prev;
+        const targetId = myId || socket?.id || "local";
+        const fallbackState = { id: targetId, lat: 18.20278, lng: 83.68889, heading: 0, lastUpdate: Date.now() }; 
+        return [fallbackState];
+      });
       setIsLoading(false);
     };
 
@@ -272,7 +647,7 @@ export default function App() {
       watchId = navigator.geolocation.watchPosition(updateLocation, handleLocationError, { 
         enableHighAccuracy: true,
         maximumAge: 0,
-        timeout: 30000 // Increased timeout to 30s
+        timeout: 30000
       });
     } else {
       handleLocationError(new Error("Not supported"));
@@ -281,7 +656,7 @@ export default function App() {
     return () => {
       if (watchId) navigator.geolocation.clearWatch(watchId);
     };
-  }, [socket, hospitals.length, ambulances.length]);
+  }, [socket?.id]);
 
   const requestManualGps = () => {
     setLocationErrorMessage("Requesting precise GPS location...");
@@ -293,15 +668,16 @@ export default function App() {
           const lat = pos.coords.latitude;
           const lng = pos.coords.longitude;
           const heading = pos.coords.heading;
+          const targetId = myId || socket?.id || "local";
           const newState = { 
-            id: socket?.id || "local",
+            id: targetId,
             lat, 
             lng, 
             heading: heading || 0,
             lastUpdate: Date.now()
           };
           setAmbulances(prev => {
-            const index = prev.findIndex(a => a.id === newState.id);
+            const index = prev.findIndex(a => a.id === targetId || a.id === "local");
             if (index !== -1) {
               const newAmbs = [...prev];
               newAmbs[index] = newState;
@@ -329,7 +705,7 @@ export default function App() {
     setIsLoading(true);
     const result = await fetchNearbyHospitals(lat, lng);
     
-    // Initial sort by a mix of proximity and doctors
+    // Initial sort by proximity and capacity
     const sortedHospitals = result.hospitals.sort((a, b) => {
       const distA = Math.sqrt(Math.pow(a.lat - lat, 2) + Math.pow(a.lng - lng, 2));
       const distB = Math.sqrt(Math.pow(b.lat - lat, 2) + Math.pow(b.lng - lng, 2));
@@ -345,7 +721,7 @@ export default function App() {
     setIsLoading(false);
   };
 
-  const myAmbulance = ambulances.find(a => a.id === myId) || ambulances[0];
+  const myAmbulance = ambulances.find(a => a.id === myId || a.id === socket?.id || a.id === "local") || ambulances[0];
 
   const handleHospitalSelect = useCallback(async (h: Hospital) => {
     if (!myAmbulance) return;
@@ -367,51 +743,111 @@ export default function App() {
     if (hospitals.length === 0 || !myAmbulance) return;
     setIsAnalyzing(true);
     setAiAnalysis(null);
-    setSelectedHospital(null); 
-    
-    let bestHospital: Hospital | null = null;
-    let shortestDuration = Infinity;
-    
-    // Strict Condition: Minimum 5 beds and 5 doctors
-    const qualifiedHospitals = hospitals.filter(h => h.availableBeds >= 5 && h.doctorsCount >= 5);
-    const hospitalsToEvaluate = qualifiedHospitals.length > 0 ? qualifiedHospitals : hospitals;
-    
-    // Simulate thinking/scanning phase
-    for (const h of hospitalsToEvaluate.slice(0, 5)) {
-      setEvaluatingHospitalId(h.id);
-      await sleep(800); // 800ms per hospital for visual effect
-      
-      const routeData = await getRoute(
-        { lat: myAmbulance.lat, lng: myAmbulance.lng }, 
-        { lat: h.lat, lng: h.lng },
-        trafficMode === 'Dynamic' ? undefined : trafficMode
-      );
-      
-      if (routeData) {
-        if (routeData.duration < shortestDuration) {
-          shortestDuration = routeData.duration;
-          bestHospital = h;
-          (bestHospital as any).currentRoute = routeData;
-        }
-      }
-    }
-    
+
+    // Evaluate up to 6 candidate facilities in parallel for fast execution
+    const candidates = hospitals.filter(h => h.availableBeds > 0);
+    const evalTargets = (candidates.length > 0 ? candidates : hospitals).slice(0, 6);
+
+    const routeResults = await Promise.all(
+      evalTargets.map(async (h) => {
+        setEvaluatingHospitalId(h.id);
+        const routeData = await getRoute(
+          { lat: myAmbulance.lat, lng: myAmbulance.lng },
+          { lat: h.lat, lng: h.lng },
+          trafficMode === 'Dynamic' ? undefined : trafficMode
+        );
+        return { hospital: h, route: routeData };
+      })
+    );
+
     setEvaluatingHospitalId(null);
-    
-    if (bestHospital) {
-      const route = (bestHospital as any).currentRoute;
-      const metCriteria = bestHospital.availableBeds >= 5 && bestHospital.doctorsCount >= 5;
-      const analysis = {
-        recommendedHospitalId: bestHospital.id,
-        reasoning: metCriteria 
-          ? `AI Optimization Result: ${bestHospital.name} selected. It meets the strict criteria (5+ beds, 5+ doctors) and offers the shortest travel time of ${Math.round(route.duration / 60)} min.`
-          : `AI Optimization Result: No nearby hospitals met the strict 5 bed/doctor criteria. ${bestHospital.name} selected as the fastest available fallback (${Math.round(route.duration / 60)} min).`,
-        trafficAlerts: [route.trafficCondition === 'Heavy' ? "CAUTION: Heavy traffic on primary route" : "Route traffic is currently manageable"],
-        estimatedTimeReduction: `Minimum Traffic Time: ${Math.round(route.duration / 60)} mins`
-      };
-      setAiAnalysis(analysis);
-      handleHospitalSelect(bestHospital);
+    const validResults = routeResults.filter((r): r is { hospital: Hospital; route: RouteInfo } => r.route !== null);
+
+    if (validResults.length === 0) {
+      setIsAnalyzing(false);
+      return;
     }
+
+    // Min & Max travel times for normalization
+    const durations = validResults.map(r => r.route.duration);
+    const minTime = Math.min(...durations);
+    const maxTime = Math.max(...durations);
+
+    // Multi-Criteria Decision Analysis (MCDA) Scoring
+    const scoredHospitals: HospitalScore[] = validResults.map(item => {
+      const h = item.hospital;
+      const r = item.route;
+
+      // 1. Travel Time Score (0 - 100)
+      const timeDiff = maxTime - minTime;
+      const travelTimeScore = timeDiff > 0 
+        ? Math.max(0, 100 * (1 - (r.duration - minTime) / (timeDiff + 1)))
+        : 100;
+
+      // 2. Bed & Staffing Capacity Score (0 - 100)
+      const capacityScore = Math.min(100, Math.round((h.availableBeds / 15) * 60 + (h.doctorsCount / 30) * 40));
+
+      // 3. Emergency Specialization Score (0 - 100)
+      let specializationScore = 75;
+      const typeLower = (h.type || "").toLowerCase();
+      const nameLower = (h.name || "").toLowerCase();
+
+      if (emergencyType === 'cardiac' || emergencyType === 'stroke') {
+        if (typeLower.includes('trauma') || typeLower.includes('tertiary') || nameLower.includes('general') || h.isSpecialized) {
+          specializationScore = 100;
+        } else {
+          specializationScore = 75;
+        }
+      } else if (emergencyType === 'burns' || emergencyType === 'trauma') {
+        if (typeLower.includes('trauma') || typeLower.includes('specialty')) {
+          specializationScore = 100;
+        } else {
+          specializationScore = 80;
+        }
+      } else {
+        specializationScore = 85;
+      }
+
+      // Weighted Composite Optimization Score (Time: 45%, Specialty: 30%, Capacity: 25%)
+      const compositeScore = Math.round(
+        travelTimeScore * 0.45 + specializationScore * 0.30 + capacityScore * 0.25
+      );
+
+      const reasoning = `${h.name}: Composite Score ${compositeScore}/100 — ${Math.round(r.duration / 60)} min ETA, ${h.availableBeds} beds available, ${h.doctorsCount} staff.`;
+
+      return {
+        hospital: h,
+        route: r,
+        compositeScore,
+        travelTimeScore: Math.round(travelTimeScore),
+        capacityScore: Math.round(capacityScore),
+        specializationScore: Math.round(specializationScore),
+        reasoning
+      };
+    });
+
+    // Sort by composite score descending
+    scoredHospitals.sort((a, b) => b.compositeScore - a.compositeScore);
+    const recommended = scoredHospitals[0];
+
+    const sortedByTime = [...scoredHospitals].sort((a, b) => a.route.duration - b.route.duration);
+    const sortedByCap = [...scoredHospitals].sort((a, b) => b.hospital.availableBeds - a.hospital.availableBeds);
+
+    const trafficAlerts = validResults.some(r => r.route.trafficCondition === 'Heavy')
+      ? ["CAUTION: Heavy congestion detected on primary access corridors"]
+      : ["Route traffic conditions are currently manageable"];
+
+    const optimizationResult: OptimizationResult = {
+      recommended,
+      fastestRoute: sortedByTime[0],
+      maxCapacity: sortedByCap[0],
+      evaluatedCount: validResults.length,
+      trafficAlerts,
+      recommendationReasoning: `AI Multi-Criteria Result: ${recommended.hospital.name} recommended with a composite score of ${recommended.compositeScore}/100. Balances shortest transit (${Math.round(recommended.route.duration / 60)} min) with ${recommended.hospital.availableBeds} available beds and specialty care.`
+    };
+
+    setAiAnalysis(optimizationResult);
+    handleHospitalSelect(recommended.hospital);
     setIsAnalyzing(false);
   };
 
@@ -423,25 +859,49 @@ export default function App() {
     }
   }, [hospitals, myAmbulance, hasAutoSelected]);
 
+  const simStepRef = React.useRef(0);
+
   useEffect(() => {
     let interval: any;
     if (isSimulating && route?.geometry && myAmbulance) {
-      interval = setInterval(() => {
-        const newState = {
-          ...myAmbulance,
-          lat: myAmbulance.lat + (Math.random() - 0.5) * 0.0001,
-          lng: myAmbulance.lng + (Math.random() - 0.5) * 0.0001,
-          lastUpdate: Date.now()
-        };
-        
-        setAmbulances(prev => prev.map(a => a.id === myId ? newState : a));
-        if (socket?.connected) {
-          socket.emit("ambulance:update", newState);
-        }
-      }, 10000); // Update every 10 seconds as requested
+      const points = polyline.decode(route.geometry) as [number, number][];
+      if (points.length >= 2) {
+        interval = setInterval(() => {
+          simStepRef.current = (simStepRef.current + 1) % points.length;
+          const currentPt = points[simStepRef.current];
+          const nextPt = points[(simStepRef.current + 1) % points.length];
+          const heading = calculateBearing(currentPt[0], currentPt[1], nextPt[0], nextPt[1]);
+
+          const newState: AmbulanceState = {
+            id: myAmbulance.id,
+            lat: currentPt[0],
+            lng: currentPt[1],
+            heading,
+            lastUpdate: Date.now()
+          };
+
+          setAmbulances(prev => {
+            const targetId = myId || "local";
+            const idx = prev.findIndex(a => a.id === targetId);
+            if (idx !== -1) {
+              const updated = [...prev];
+              updated[idx] = newState;
+              return updated;
+            }
+            return [...prev, newState];
+          });
+
+          if (socket?.connected) {
+            socket.emit("ambulance:update", newState);
+          }
+        }, Math.max(300, Math.round(1500 / simSpeed)));
+      }
+    } else {
+      simStepRef.current = 0;
     }
     return () => clearInterval(interval);
-  }, [isSimulating, route, myAmbulance, socket, myId]);
+  }, [isSimulating, simSpeed, route?.geometry, myId, socket, myAmbulance]);
+
 
   const formatDistance = (m: number) => (m / 1000).toFixed(1) + " km";
   const formatDuration = (s: number) => Math.round(s / 60) + " min";
@@ -545,9 +1005,14 @@ export default function App() {
               {locationErrorMessage && (
                 <p className="text-[10px] text-yellow-200">{locationErrorMessage}</p>
               )}
-              {isUsingMockHospitals && (
-                <p className="text-[10px] text-yellow-200">Live hospital lookup failed; using local fallback data.</p>
-              )}
+              <div className="flex items-center gap-1.5">
+                <span className="text-[8px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded shrink-0">
+                  DEMO DATA
+                </span>
+                <p className="text-[10px] text-amber-200/90 font-medium">
+                  Hospital availability is simulated for demonstration.
+                </p>
+              </div>
             </div>
           </div>
         </div>
@@ -555,9 +1020,35 @@ export default function App() {
         <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
           {/* Emergency Type Selection */}
           <section>
-            <h2 className="text-xs font-bold uppercase tracking-widest text-neutral-400 mb-4 flex items-center gap-2">
-              <ShieldAlert className="w-3 h-3" /> Emergency Context
-            </h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xs font-bold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
+                <ShieldAlert className="w-3 h-3" /> Emergency Context
+              </h2>
+              <div className="flex items-center gap-2">
+                {isListeningContext && (
+                  <span className="text-[10px] font-bold text-red-400 animate-pulse flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-red-500 animate-ping inline-block" /> Listening...
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleVoiceInputContext}
+                  title="Voice Command Emergency Selection"
+                  className={cn(
+                    "px-2 py-1 rounded-lg border transition-all flex items-center justify-center text-xs gap-1.5 font-bold",
+                    isListeningContext
+                      ? "bg-red-600 text-white border-red-500 shadow-[0_0_12px_rgba(220,38,38,0.5)] animate-pulse"
+                      : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10 hover:text-white"
+                  )}
+                >
+                  <Mic className="w-3.5 h-3.5" />
+                  <span className="text-[9px] uppercase tracking-wider">Voice</span>
+                </button>
+              </div>
+            </div>
+            {contextSpeechError && (
+              <p className="text-[10px] text-red-400 font-bold mb-3 animate-fadeIn">{contextSpeechError}</p>
+            )}
             <div className="grid grid-cols-2 gap-2">
               {[...EMERGENCY_TYPES, ...customEmergencyTypes].map((type) => (
                 <button
@@ -579,10 +1070,10 @@ export default function App() {
               ))}
             </div>
             <button 
-              onClick={() => setIsReportModalOpen(true)}
+              onClick={handleOpenReportModal}
               className="w-full mt-3 py-2 border border-dashed border-white/20 rounded-xl text-slate-400 hover:text-red-400 hover:border-red-400/50 hover:bg-red-500/10 transition-all text-[10px] font-bold uppercase tracking-widest flex items-center justify-center gap-2 backdrop-blur-sm"
             >
-              <MessageSquare className="w-3 h-3" /> Report Missing Case
+              <Plus className="w-3 h-3" /> Report Case
             </button>
           </section>
 
@@ -619,6 +1110,32 @@ export default function App() {
             </div>
 
             <div className="bg-white/5 backdrop-blur-md px-4 py-3 rounded-xl border border-white/10 shadow-lg">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-yellow-400" />
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Simulation Speed</p>
+                </div>
+                <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-300">
+                  {simSpeed}x Speed
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-1 p-1 bg-black/20 rounded-lg border border-white/5">
+                {([1, 2, 4] as const).map((spd) => (
+                  <button
+                    key={spd}
+                    onClick={() => setSimSpeed(spd)}
+                    className={cn(
+                      "text-[9px] font-bold py-1 rounded-md transition-all",
+                      simSpeed === spd ? "bg-red-600 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+                    )}
+                  >
+                    {spd}x
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="bg-white/5 backdrop-blur-md px-4 py-3 rounded-xl border border-white/10 shadow-lg">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Navigation className={cn("w-4 h-4", isSimulating ? "text-red-500 animate-pulse" : "text-slate-400")} />
@@ -645,35 +1162,7 @@ export default function App() {
             </div>
           </section>
 
-          {/* Emergency Context Section (Still on the left for quick triage) */}
-          <section className="bg-white/5 backdrop-blur-md rounded-2xl p-5 border border-white/10 shadow-xl mb-6 relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-red-600/10 rounded-full blur-2xl pointer-events-none" />
-            <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4 flex items-center gap-2 relative z-10">
-              <Activity className="w-3 h-3 text-red-500" /> Patient Status
-            </h2>
-            <div className="flex flex-wrap gap-2">
-                {customEmergencyTypes.concat(EMERGENCY_TYPES).map((type) => (
-                    <button
-                        key={type.id}
-                        onClick={() => setEmergencyType(type.id)}
-                        className={cn(
-                            "px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all flex items-center gap-2 backdrop-blur-sm",
-                            emergencyType === type.id 
-                                ? "bg-red-600/20 border-red-500/50 text-red-400 shadow-[0_0_15px_rgba(220,38,38,0.3)]" 
-                                : "bg-white/5 border-white/5 text-slate-400 hover:bg-white/10 hover:text-white"
-                        )}
-                    >
-                        {type.icon} {type.label}
-                    </button>
-                ))}
-                <button 
-                  onClick={() => setIsReportModalOpen(true)}
-                  className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border border-dashed border-white/20 text-slate-400 hover:border-blue-400/50 hover:text-blue-400 hover:bg-blue-500/10 transition-all flex items-center gap-2 backdrop-blur-sm"
-                >
-                  <Plus className="w-3 h-3" /> Report Case
-                </button>
-            </div>
-          </section>
+
         </div>
 
         {/* Footer Controls */}
@@ -933,17 +1422,22 @@ export default function App() {
 
               <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar relative z-10">
                   <section>
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4">Core Resources</h3>
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Core Resources</h3>
+                        <span className="px-1.5 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded text-[8px] font-black uppercase tracking-widest">
+                          DEMO DATA
+                        </span>
+                      </div>
                       <div className="grid grid-cols-2 gap-4">
                           <div className="bg-white/5 backdrop-blur-md p-4 rounded-2xl border border-white/10 flex flex-col items-center text-center shadow-lg">
                               <Activity className="w-6 h-6 text-blue-400 mb-2" />
                               <p className="text-xl font-black text-white">{selectedHospital.availableBeds}</p>
-                              <p className="text-[10px] font-bold text-slate-400 uppercase">Available Beds</p>
+                              <p className="text-[10px] font-bold text-slate-400 uppercase">Available Beds (Simulated)</p>
                           </div>
                           <div className="bg-white/5 backdrop-blur-md p-4 rounded-2xl border border-white/10 flex flex-col items-center text-center shadow-lg">
                               <User className="w-6 h-6 text-red-400 mb-2" />
                               <p className="text-xl font-black text-white">{selectedHospital.doctorsCount}</p>
-                              <p className="text-[10px] font-bold text-slate-400 uppercase">On-Call Staff</p>
+                              <p className="text-[10px] font-bold text-slate-400 uppercase">On-Call Staff (Simulated)</p>
                           </div>
                       </div>
                   </section>
@@ -962,7 +1456,7 @@ export default function App() {
                               <Activity className="w-5 h-5 text-slate-400 shrink-0 mt-0.5" />
                               <div>
                                   <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Hospital Capacity</p>
-                                  <p className="text-sm font-bold text-white">{selectedHospital.beds} Total Licensed Beds</p>
+                                  <p className="text-sm font-bold text-white">{selectedHospital.beds} Total Licensed Beds (Simulated)</p>
                               </div>
                           </div>
                       </div>
@@ -988,34 +1482,56 @@ export default function App() {
                     </button>
                   </section>
 
-                  {/* AI Insights Display */}
+                  {/* Multi-Criteria AI Optimization Display */}
                   <AnimatePresence>
                     {aiAnalysis && (
                       <motion.section
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
-                        className="bg-yellow-50 border border-yellow-200 rounded-2xl p-5 space-y-3"
+                        className="bg-slate-900/90 border border-yellow-500/30 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-md"
                       >
-                        <div className="flex items-center gap-2 text-yellow-800 font-bold text-sm">
-                          <Info className="w-4 h-4" />
-                          Optimization Insight
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 text-yellow-400 font-black text-xs uppercase tracking-wider">
+                            <Zap className="w-4 h-4 text-yellow-400" />
+                            AI Multi-Criteria Recommendation
+                          </div>
+                          {aiAnalysis.recommended?.compositeScore && (
+                            <span className="px-2.5 py-1 bg-yellow-500/20 text-yellow-300 text-[10px] font-black rounded-lg border border-yellow-500/40">
+                              Score: {aiAnalysis.recommended.compositeScore}/100
+                            </span>
+                          )}
                         </div>
-                        <p className="text-xs text-yellow-900 leading-relaxed font-medium">
-                          {aiAnalysis.reasoning}
+
+                        <p className="text-xs text-slate-300 leading-relaxed font-medium">
+                          {aiAnalysis.recommendationReasoning || aiAnalysis.reasoning}
                         </p>
+
+                        {aiAnalysis.recommended && (
+                          <div className="grid grid-cols-3 gap-2 pt-1">
+                            <div className="bg-white/5 p-2 rounded-xl border border-white/5 text-center">
+                              <p className="text-[8px] font-bold uppercase text-slate-400">Transit</p>
+                              <p className="text-xs font-black text-green-400">{aiAnalysis.recommended.travelTimeScore}/100</p>
+                            </div>
+                            <div className="bg-white/5 p-2 rounded-xl border border-white/5 text-center">
+                              <p className="text-[8px] font-bold uppercase text-slate-400">Capacity</p>
+                              <p className="text-xs font-black text-blue-400">{aiAnalysis.recommended.capacityScore}/100</p>
+                            </div>
+                            <div className="bg-white/5 p-2 rounded-xl border border-white/5 text-center">
+                              <p className="text-[8px] font-bold uppercase text-slate-400">Specialty</p>
+                              <p className="text-xs font-black text-yellow-400">{aiAnalysis.recommended.specializationScore}/100</p>
+                            </div>
+                          </div>
+                        )}
+
                         {aiAnalysis.trafficAlerts?.length > 0 && (
                           <div className="space-y-1">
                             {aiAnalysis.trafficAlerts.map((alert: string, i: number) => (
-                              <div key={i} className="flex items-center gap-2 text-[9px] text-red-600 font-bold bg-red-50 p-2 rounded-lg">
-                                <AlertTriangle className="w-3 h-3" /> {alert}
+                              <div key={i} className="flex items-center gap-2 text-[9px] text-red-400 font-bold bg-red-500/10 p-2 rounded-lg border border-red-500/20">
+                                <AlertTriangle className="w-3 h-3 text-red-400" /> {alert}
                               </div>
                             ))}
                           </div>
                         )}
-                        <div className="pt-2 border-t border-yellow-200 flex justify-between items-center">
-                          <span className="text-[9px] font-black uppercase text-yellow-700 tracking-wider">Traffic Analysis Result</span>
-                          <span className="text-xs font-black text-green-600">{aiAnalysis.estimatedTimeReduction}</span>
-                        </div>
                       </motion.section>
                     )}
                   </AnimatePresence>
@@ -1049,13 +1565,36 @@ export default function App() {
               </div>
 
               <div className="p-6 bg-slate-900/80 border-t border-white/10 space-y-3 shrink-0 backdrop-blur-md relative z-10">
+                  {dispatchSuccessMessage && (
+                    <div className="p-3 bg-emerald-500/20 border border-emerald-500/40 rounded-xl text-emerald-300 text-xs font-bold text-center animate-fadeIn flex items-center justify-center gap-2">
+                      <ShieldAlert className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>{dispatchSuccessMessage}</span>
+                    </div>
+                  )}
                   <button 
-                    onClick={() => setIsConfirmed(true)}
-                    className="w-full py-4 bg-red-600 text-white font-black uppercase tracking-widest text-xs rounded-xl shadow-[0_0_20px_rgba(220,38,38,0.4)] hover:bg-red-500 transition-all active:scale-[0.98]"
+                    onClick={handleDirectDispatch}
+                    disabled={isDispatching}
+                    className={cn(
+                      "w-full py-4 text-white font-black uppercase tracking-widest text-xs rounded-xl shadow-[0_0_20px_rgba(220,38,38,0.4)] transition-all active:scale-[0.98] flex items-center justify-center gap-2",
+                      isConfirmed ? "bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/40" : "bg-red-600 hover:bg-red-500"
+                    )}
                   >
-                    Direct Dispatch
+                    {isDispatching ? (
+                      <><RefreshCw className="w-4 h-4 animate-spin text-white" /> Dispatching Unit...</>
+                    ) : isConfirmed ? (
+                      <><ShieldAlert className="w-4 h-4 text-white animate-pulse" /> Dispatch Active — Units En Route</>
+                    ) : (
+                      <><Navigation className="w-4 h-4 text-white" /> Direct Dispatch</>
+                    )}
                   </button>
-                  <button className="w-full py-4 bg-white/5 border border-white/10 text-white font-black uppercase tracking-widest text-xs rounded-xl hover:bg-white/10 transition-all">
+                  <button 
+                    onClick={() => {
+                      if (selectedHospital) {
+                        alert(`Contacting ER Emergency Hotline for ${selectedHospital.name}\n\nDirect Line: +1 (800) 555-ER-HOTLINE\nFacility: ${selectedHospital.name}\nAddress: ${selectedHospital.address || 'Main District Emergency Gate'}`);
+                      }
+                    }}
+                    className="w-full py-4 bg-white/5 border border-white/10 text-white font-black uppercase tracking-widest text-xs rounded-xl hover:bg-white/10 transition-all flex items-center justify-center gap-2"
+                  >
                     Contact ER
                   </button>
               </div>
@@ -1071,8 +1610,14 @@ export default function App() {
               <div className="p-6 border-b border-white/10 bg-slate-900/80 flex flex-col gap-4 relative z-10 backdrop-blur-md">
                 <div className="flex justify-between items-start">
                   <div>
-                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">Available Care</h3>
+                    <div className="flex items-center gap-2 mb-1">
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Available Care</h3>
+                      <span className="px-1.5 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded text-[8px] font-black uppercase tracking-widest">
+                        DEMO DATA
+                      </span>
+                    </div>
                     <h2 className="text-xl font-bold text-white">Nearby Facilities</h2>
+                    <p className="text-[10px] text-slate-400 mt-0.5 font-medium">Hospital availability is simulated for demonstration</p>
                   </div>
                   <div className="p-2 bg-blue-500/20 text-blue-400 rounded-lg border border-blue-500/30">
                     <HospitalIcon className="w-5 h-5" />
@@ -1169,84 +1714,222 @@ export default function App() {
     </div>
 
     {/* Reporting Modal */}
-
     <AnimatePresence>
         {isReportModalOpen && (
-          <div className="fixed inset-0 z-100 flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setIsReportModalOpen(false)}
+              onClick={() => {
+                setIsReportModalOpen(false);
+                setReportError(null);
+                setReportSuccessMessage(null);
+              }}
               className="absolute inset-0 bg-slate-950/80 backdrop-blur-md"
             />
             <motion.div 
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-md bg-slate-900/80 backdrop-blur-xl border border-white/10 rounded-3xl p-8 shadow-2xl"
+              className="relative w-full max-w-lg bg-slate-900/95 backdrop-blur-2xl border border-white/10 rounded-3xl p-6 md:p-8 shadow-2xl overflow-y-auto max-h-[90vh] custom-scrollbar z-10"
             >
-              <div className="flex items-center gap-3 mb-6">
-                <div className="p-3 bg-blue-500/20 text-blue-400 rounded-2xl border border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.3)]">
-                  <FileText className="w-6 h-6" />
+              <div className="flex items-center justify-between mb-5">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 bg-red-500/20 text-red-400 rounded-2xl border border-red-500/30 shadow-[0_0_15px_rgba(239,68,68,0.3)]">
+                    <ShieldAlert className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-black tracking-tight text-white">Report Emergency Case</h2>
+                    <p className="text-xs text-slate-400 font-medium">Broadcast new patient context to central dispatch</p>
+                  </div>
                 </div>
-                <div>
-                  <h2 className="text-xl font-black tracking-tight text-white">Report Missing Case</h2>
-                  <p className="text-sm text-slate-400 font-medium">Add a new emergency context to the system</p>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsReportModalOpen(false);
+                    setReportError(null);
+                    setReportSuccessMessage(null);
+                  }}
+                  className="p-2 text-slate-400 hover:text-white rounded-full bg-white/5 hover:bg-white/10 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
 
-              <div className="space-y-4">
-                <div>
-                  <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1 block ml-1">Emergency Title</label>
-                  <input 
-                    type="text" 
-                    value={reportText}
-                    onChange={(e) => setReportText(e.target.value)}
-                    placeholder="e.g. Heat Stroke, Allergic Reaction"
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all text-white placeholder-slate-500"
-                  />
+              {reportSuccessMessage && (
+                <div className="mb-4 p-4 bg-emerald-500/20 border border-emerald-500/40 rounded-2xl text-emerald-300 text-xs font-bold flex items-center gap-2 animate-fadeIn">
+                  <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-400" />
+                  <span>{reportSuccessMessage}</span>
                 </div>
-                
-                <div className="p-4 bg-yellow-500/10 border border-yellow-500/20 rounded-2xl flex gap-3">
-                  <Info className="w-5 h-5 text-yellow-400 shrink-0" />
-                  <p className="text-xs text-yellow-200 leading-relaxed font-medium">
-                    Reported cases are sent to central dispatch for review. They will appear in your local session immediately with a <span className="font-bold underline text-yellow-400">Reported Case</span> tag.
-                  </p>
+              )}
+
+              {reportError && (
+                <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-xs font-bold flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+                  <span>{reportError}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleEmergencyReportSubmit} className="space-y-4">
+                {/* Emergency Type */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 block ml-1">
+                      Emergency Type <span className="text-red-400">*</span>
+                    </label>
+                    {isListening && (
+                      <span className="text-[10px] font-bold text-red-400 animate-pulse flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-red-500 animate-ping inline-block" /> Listening...
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={reportType}
+                      onChange={(e) => {
+                        const newType = e.target.value;
+                        setReportType(newType);
+                        setReportTitle(`${newType} Incident`);
+                      }}
+                      className="flex-1 px-4 py-3 bg-slate-800 border border-white/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500/50 focus:border-red-500 transition-all text-white text-sm font-medium"
+                    >
+                      {[
+                        "Accident",
+                        "Heart Attack",
+                        "Stroke",
+                        "Breathing Difficulty",
+                        "Heat Stroke",
+                        "Unconscious Person",
+                        "Other"
+                      ].map((type) => (
+                        <option key={type} value={type} className="bg-slate-900 text-white">
+                          {type}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleVoiceInput}
+                      title="Speak Emergency Type"
+                      className={cn(
+                        "p-3 rounded-xl border transition-all flex items-center justify-center shrink-0",
+                        isListening
+                          ? "bg-red-600 text-white border-red-500 shadow-[0_0_15px_rgba(220,38,38,0.5)] animate-pulse"
+                          : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10 hover:text-white"
+                      )}
+                    >
+                      <Mic className="w-5 h-5" />
+                    </button>
+                  </div>
                 </div>
 
-                <div className="flex gap-2 pt-2">
+                {/* Severity */}
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5 block ml-1">
+                    Severity <span className="text-red-400">*</span>
+                  </label>
+                  <div className="grid grid-cols-4 gap-1.5 p-1 bg-black/30 rounded-xl border border-white/5">
+                    {(['Critical', 'High', 'Moderate', 'Low'] as const).map((lvl) => (
+                      <button
+                        key={lvl}
+                        type="button"
+                        onClick={() => setSeverity(lvl)}
+                        className={cn(
+                          "py-2 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all",
+                          severity === lvl
+                            ? lvl === 'Critical' ? "bg-red-600 text-white shadow-md shadow-red-600/30"
+                              : lvl === 'High' ? "bg-orange-600 text-white shadow-md shadow-orange-600/30"
+                              : lvl === 'Moderate' ? "bg-yellow-600 text-white shadow-md shadow-yellow-600/30"
+                              : "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                            : "text-slate-400 hover:text-white"
+                        )}
+                      >
+                        {lvl}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Location */}
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5 block ml-1">
+                    Location <span className="text-red-400">*</span>
+                  </label>
+                  <input 
+                    type="text" 
+                    required
+                    value={reportLocation}
+                    onChange={(e) => setReportLocation(e.target.value)}
+                    placeholder="e.g. Main Highway KM 14, Near City Center"
+                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500/50 focus:border-red-500 transition-all text-white placeholder-slate-500 text-sm font-medium"
+                  />
+                </div>
+
+                {/* Emergency Title */}
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5 block ml-1">
+                    Emergency Title <span className="text-red-400">*</span>
+                  </label>
+                  <input 
+                    type="text" 
+                    required
+                    value={reportTitle}
+                    onChange={(e) => setReportTitle(e.target.value)}
+                    placeholder="e.g. Severe Vehicle Collision, Patient Unresponsive"
+                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500/50 focus:border-red-500 transition-all text-white placeholder-slate-500 text-sm font-medium"
+                  />
+                </div>
+
+                {/* Description */}
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5 block ml-1">
+                    Description
+                  </label>
+                  <textarea 
+                    rows={3}
+                    value={reportNotes}
+                    onChange={(e) => setReportNotes(e.target.value)}
+                    placeholder="Add specific symptoms, location landmarks, or vital details..."
+                    className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-500/50 focus:border-red-500 transition-all text-white placeholder-slate-500 text-xs font-medium custom-scrollbar"
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-3">
                   <button 
-                    onClick={() => setIsReportModalOpen(false)}
-                    className="flex-1 py-3 text-sm font-bold text-slate-400 hover:bg-white/10 hover:text-white rounded-xl transition-all border border-transparent hover:border-white/10"
+                    type="button"
+                    onClick={() => {
+                      setIsReportModalOpen(false);
+                      setReportError(null);
+                      setReportSuccessMessage(null);
+                    }}
+                    className="flex-1 py-3.5 text-xs font-bold text-slate-300 hover:bg-white/10 hover:text-white rounded-xl transition-all border border-white/10"
                   >
                     Cancel
                   </button>
                   <button 
-                    onClick={() => {
-                      if (!reportText) return;
-                      const newType = {
-                        id: reportText.toLowerCase().replace(/\s+/g, '-'),
-                        label: reportText,
-                        icon: <Activity className="w-4 h-4" />,
-                        color: "bg-blue-100 text-blue-700 border-blue-200",
-                        isCustom: true
-                      };
-                      setCustomEmergencyTypes(prev => [...prev, newType]);
-                      setReportText("");
-                      setIsReportModalOpen(false);
-                      setEmergencyType(newType.id);
-                    }}
-                    className="flex-1 py-3 bg-neutral-900 text-white text-sm font-bold rounded-xl shadow-lg shadow-neutral-900/10 hover:bg-neutral-800 transition-all"
+                    type="submit"
+                    disabled={isSubmittingReport || !!reportSuccessMessage}
+                    className="flex-1 py-3.5 bg-red-600 text-white text-xs font-black uppercase tracking-widest rounded-xl shadow-lg shadow-red-600/30 hover:bg-red-500 active:scale-[0.98] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                   >
-                    Submit Report
+                    {isSubmittingReport ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                        Submitting...
+                      </>
+                    ) : (
+                      <>
+                        <ShieldAlert className="w-4 h-4 text-white" />
+                        Submit Report
+                      </>
+                    )}
                   </button>
                 </div>
-              </div>
+              </form>
             </motion.div>
           </div>
         )}
-      </AnimatePresence>
+    </AnimatePresence>
     </div>
   );
 }

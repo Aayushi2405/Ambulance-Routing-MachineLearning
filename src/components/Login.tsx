@@ -17,6 +17,21 @@ export default function Login({ onLogin, onGoToRegister, infoMessage }: LoginPro
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanEmail = email.trim();
+    
+    if (!cleanEmail) {
+      setError("Please enter your email address.");
+      return;
+    }
+    if (!/\S+@\S+\.\S+/.test(cleanEmail)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+    if (!password) {
+      setError("Please enter your password.");
+      return;
+    }
+
     setError("");
     setIsSubmitting(true);
     
@@ -24,21 +39,21 @@ export default function Login({ onLogin, onGoToRegister, infoMessage }: LoginPro
       const response = await fetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email: cleanEmail, password }),
       });
       
       const data = await response.json();
       if (data.success && data.sessionId) {
         onLogin({ 
-          userName: data.user.full_name || email, 
+          userName: data.user.full_name || cleanEmail, 
           sessionId: data.sessionId,
           licensePlate: data.user.license_plate
         });
       } else {
-        setError(data.message || "Invalid credentials");
+        setError(data.message || "Invalid email or password");
       }
     } catch (err) {
-      setError("Network error. Is the server running?");
+      setError("Network error. Unable to reach dispatch server.");
     } finally {
       setIsSubmitting(false);
     }

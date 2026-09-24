@@ -148,8 +148,17 @@ export default function MapComponent({ ambulances, currentAmbulanceId, hospitals
 
   useEffect(() => {
     if (route?.geometry) {
-      const points = polyline.decode(route.geometry);
-      setDecodedPath(points as [number, number][]);
+      try {
+        const points = polyline.decode(route.geometry);
+        if (Array.isArray(points) && points.length > 0) {
+          setDecodedPath(points as [number, number][]);
+        } else {
+          setDecodedPath([]);
+        }
+      } catch (err) {
+        console.warn("Failed to decode route geometry polyline:", err);
+        setDecodedPath([]);
+      }
     } else {
       setDecodedPath([]);
     }

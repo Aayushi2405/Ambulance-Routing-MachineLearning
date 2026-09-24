@@ -19,6 +19,30 @@ export default function Register({ onRegister, onBackToLogin }: RegisterProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanName = fullName.trim();
+    const cleanEmail = email.trim();
+    const cleanPlate = licensePlate.trim();
+
+    if (!cleanName) {
+      setError("Please enter your full name.");
+      containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    if (!cleanEmail || !/\S+@\S+\.\S+/.test(cleanEmail)) {
+      setError("Please enter a valid email address.");
+      containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    if (!cleanPlate) {
+      setError("Please enter your vehicle license plate number.");
+      containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    if (!password || password.length < 6) {
+      setError("Password must be at least 6 characters long.");
+      containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
     if (password !== confirmPassword) {
       setError("Passwords do not match");
       containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
@@ -32,18 +56,18 @@ export default function Register({ onRegister, onBackToLogin }: RegisterProps) {
       const response = await fetch("/api/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fullName, email, licensePlate, password }),
+        body: JSON.stringify({ fullName: cleanName, email: cleanEmail, licensePlate: cleanPlate, password }),
       });
       
       const data = await response.json();
       if (data.success && data.sessionId) {
-        onRegister({ userName: fullName, sessionId: data.sessionId, licensePlate });
+        onRegister({ userName: cleanName, sessionId: data.sessionId, licensePlate: cleanPlate });
       } else {
         setError(data.message || "Registration failed");
         containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       }
     } catch (err) {
-      setError("Network error. Is the server running?");
+      setError("Network error. Unable to reach dispatch server.");
       containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
     } finally {
       setIsSubmitting(false);

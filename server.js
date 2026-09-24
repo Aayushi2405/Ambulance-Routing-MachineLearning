@@ -10,8 +10,6 @@ import dotenv from "dotenv";
 dotenv.config({ path: path.resolve(process.cwd(), '.env.local') });
 dotenv.config(); // fallback to .env if it exists
 
-const sessions = new Map();
-const generateSessionId = () => crypto.randomBytes(32).toString("hex");
 const getSessionToken = (req) => {
   const authHeader = req.headers.authorization;
   if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
@@ -20,9 +18,57 @@ const getSessionToken = (req) => {
   return null;
 };
 
+// Password Hashing with Scrypt & Random Salt
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const key = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${key}`;
+}
+
+function verifyPassword(password, storedPassword) {
+  if (!storedPassword) return false;
+  // Legacy plaintext fallback check
+  if (!storedPassword.includes(":")) {
+    return password === storedPassword;
+  }
+  const [salt, key] = storedPassword.split(":");
+  const derivedKey = crypto.scryptSync(password, salt, 64).toString("hex");
+  
+  const keyBuffer = Buffer.from(key, "hex");
+  const derivedBuffer = Buffer.from(derivedKey, "hex");
+  if (keyBuffer.length !== derivedBuffer.length) return false;
+  return crypto.timingSafeEqual(keyBuffer, derivedBuffer);
+}
+
 const databaseName = process.env.DB_NAME || 'driverdb';
 const dbFile = path.resolve(process.cwd(), `${databaseName}.sqlite`);
 let db;
+
+function createSessionInDb(userId, durationDays = 7) {
+  const token = crypto.randomBytes(32).toString("hex");
+  const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
+  
+  const stmt = db.prepare("INSERT INTO user_sessions (token, user_id, expires_at) VALUES (?, ?, ?)");
+  stmt.run(token, userId, expiresAt);
+  return token;
+}
+
+function getSessionUserFromDb(token) {
+  if (!token) return null;
+  const stmt = db.prepare(`
+    SELECT s.token, u.id, u.full_name, u.email, u.license_plate
+    FROM user_sessions s
+    JOIN users u ON s.user_id = u.id
+    WHERE s.token = ? AND s.expires_at > CURRENT_TIMESTAMP
+  `);
+  return stmt.get(token) || null;
+}
+
+function destroySessionInDb(token) {
+  if (!token) return;
+  const stmt = db.prepare("DELETE FROM user_sessions WHERE token = ?");
+  stmt.run(token);
+}
 
 async function ensureDatabaseExists() {
   db = new Database(dbFile);
@@ -38,6 +84,16 @@ async function ensureDatabaseExists() {
       email TEXT UNIQUE NOT NULL,
       password TEXT NOT NULL,
       license_plate TEXT
+    )
+  `);
+
+  // Create User Sessions table (Persistent session storage)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NOT NULL
     )
   `);
 
@@ -68,15 +124,30 @@ async function ensureDatabaseExists() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS emergencies (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT,
       patient_name TEXT,
-      location_lat REAL NOT NULL,
-      location_lng REAL NOT NULL,
-      severity TEXT,
+      location_lat REAL,
+      location_lng REAL,
+      severity TEXT DEFAULT 'High',
       status TEXT DEFAULT 'Pending',
+      notes TEXT,
       assigned_ambulance_id INTEGER REFERENCES ambulances(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Ensure title & notes columns exist in emergencies (migration check)
+  try {
+    const columns = db.prepare("PRAGMA table_info(emergencies)").all();
+    if (!columns.some(col => col.name === 'title')) {
+      db.exec("ALTER TABLE emergencies ADD COLUMN title TEXT");
+    }
+    if (!columns.some(col => col.name === 'notes')) {
+      db.exec("ALTER TABLE emergencies ADD COLUMN notes TEXT");
+    }
+  } catch (err) {
+    console.error("Migration error (emergencies):", err);
+  }
 
   // Create Routes table
   db.exec(`
@@ -123,76 +194,157 @@ async function startServer() {
   // Authentication API Endpoints
   app.post("/api/register", async (req, res) => {
     const { fullName, email, licensePlate, password } = req.body;
-    console.log("Registering:", email);
+    
+    if (!email || !password || typeof password !== 'string' || password.length < 6) {
+      return res.status(400).json({ success: false, message: "Password must be at least 6 characters long." });
+    }
+    if (!fullName || typeof fullName !== 'string' || !fullName.trim()) {
+      return res.status(400).json({ success: false, message: "Full Name is required." });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const hashedPassword = hashPassword(password);
+
     try {
       const stmt = db.prepare(
         "INSERT INTO users (full_name, email, license_plate, password) VALUES (?, ?, ?, ?) RETURNING id, full_name, email, license_plate"
       );
-      const result = stmt.get(fullName, email, licensePlate || null, password);
+      const result = stmt.get(fullName.trim(), cleanEmail, licensePlate ? licensePlate.trim() : null, hashedPassword);
       
-      const sessionId = generateSessionId();
-      sessions.set(sessionId, {
-        id: result.id,
-        full_name: result.full_name,
-        email: result.email,
-        license_plate: result.license_plate,
-      });
-      res.json({ success: true, userId: result.id, sessionId });
+      const sessionId = createSessionInDb(result.id);
+      res.json({ success: true, userId: result.id, sessionId, user: result });
     } catch (err) {
       console.error("Registration error details:", err);
-      // Unique constraint violation in SQLite
       if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
         return res.status(400).json({ success: false, message: "Email already registered" });
       }
       res.status(500).json({ 
         success: false, 
-        message: "Database Error: " + (err.message || "Unknown error"),
-        detail: err.message
+        message: "Database Error: " + (err.message || "Unknown error")
       });
     }
   });
 
   app.post("/api/login", async (req, res) => {
     const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: "Email and password are required." });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
     try {
-      const stmt = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?");
-      const user = stmt.get(email, password);
+      const stmt = db.prepare("SELECT * FROM users WHERE email = ?");
+      const user = stmt.get(cleanEmail);
       
-      if (user) {
-        const sessionId = generateSessionId();
-        sessions.set(sessionId, {
-          id: user.id,
-          full_name: user.full_name,
-          email: user.email,
-        });
-        res.json({ success: true, user, sessionId });
+      if (user && verifyPassword(password, user.password)) {
+        // Auto-upgrade legacy plaintext password if verified
+        if (!user.password.includes(":")) {
+          const newHashed = hashPassword(password);
+          db.prepare("UPDATE users SET password = ? WHERE id = ?").run(newHashed, user.id);
+        }
+
+        const sessionId = createSessionInDb(user.id);
+        const { password: _, ...safeUser } = user;
+        res.json({ success: true, user: safeUser, sessionId });
       } else {
-        res.status(401).json({ success: false, message: "Invalid credentials" });
+        res.status(401).json({ success: false, message: "Invalid email or password." });
       }
     } catch (err) {
       console.error("Login error:", err);
-      res.status(500).json({ success: false, message: "Server error" });
+      res.status(500).json({ success: false, message: "Server authentication error." });
     }
   });
 
   app.get("/api/me", (req, res) => {
     const token = getSessionToken(req);
-    if (!token || !sessions.has(token)) {
-      return res.status(401).json({ success: false, message: "Not authenticated" });
+    const sessionUser = getSessionUserFromDb(token);
+    if (!sessionUser) {
+      return res.status(401).json({ success: false, message: "Not authenticated or session expired." });
     }
-    const session = sessions.get(token);
-    res.json({ success: true, user: session });
+    res.json({ success: true, user: sessionUser });
   });
 
   app.post("/api/logout", (req, res) => {
     const token = getSessionToken(req) || req.body?.sessionId;
-    if (token && sessions.has(token)) {
-      sessions.delete(token);
-    }
+    destroySessionInDb(token);
     res.json({ success: true });
   });
 
+
+  // Emergency Reporting API Endpoints
+  app.get("/api/emergencies", (req, res) => {
+    try {
+      const stmt = db.prepare("SELECT * FROM emergencies ORDER BY id DESC LIMIT 50");
+      const emergencies = stmt.all();
+      res.json({ success: true, emergencies });
+    } catch (err) {
+      console.error("Fetch emergencies error:", err);
+      res.status(500).json({ success: false, message: "Database Error: " + err.message });
+    }
+  });
+
+  app.post("/api/emergencies", (req, res) => {
+    const { title, patientName, severity, locationLat, locationLng, notes } = req.body;
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return res.status(400).json({ success: false, message: "Emergency title is required." });
+    }
+    
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO emergencies (title, patient_name, severity, location_lat, location_lng, notes)
+        VALUES (?, ?, ?, ?, ?, ?)
+        RETURNING *
+      `);
+      const emergency = stmt.get(
+        title.trim(),
+        patientName || null,
+        severity || 'High',
+        locationLat || null,
+        locationLng || null,
+        notes || null
+      );
+      
+      // Broadcast new emergency via Socket.io
+      io.emit("emergency:created", emergency);
+
+      res.json({ success: true, emergency });
+    } catch (err) {
+      console.error("Create emergency error:", err);
+      res.status(500).json({ success: false, message: "Database Error: " + err.message });
+    }
+  });
+
+  app.post("/api/routes", (req, res) => {
+    const { emergencyId, ambulanceId, polyline, distance, duration } = req.body;
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO routes (emergency_id, ambulance_id, polyline, distance, duration)
+        VALUES (?, ?, ?, ?, ?)
+        RETURNING *
+      `);
+      const route = stmt.get(
+        emergencyId || null,
+        ambulanceId || null,
+        polyline || null,
+        distance || null,
+        duration || null
+      );
+
+      if (emergencyId) {
+        db.prepare("UPDATE emergencies SET status = 'Dispatched' WHERE id = ?").run(emergencyId);
+        io.emit("emergency:dispatched", { emergencyId, routeId: route.id, status: 'Dispatched' });
+      }
+
+      res.json({ success: true, route });
+    } catch (err) {
+      console.error("Create route error:", err);
+      res.status(500).json({ success: false, message: "Database Error: " + err.message });
+    }
+  });
+
+
   const httpServer = createServer(app);
+
   const io = new Server(httpServer, {
     cors: { origin: "*" },
   });

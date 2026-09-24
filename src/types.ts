@@ -35,3 +35,37 @@ export interface AmbulanceState {
   heading: number;
   lastUpdate?: number;
 }
+
+export interface EmergencyReport {
+  id: number | string;
+  title: string;
+  patientName?: string;
+  severity: 'Critical' | 'High' | 'Moderate' | 'Low';
+  locationLat?: number;
+  locationLng?: number;
+  status?: string;
+  notes?: string;
+  createdAt?: string;
+  isCustom?: boolean;
+}
+
+export interface HospitalScore {
+  hospital: Hospital;
+  route: RouteInfo;
+  compositeScore: number;
+  travelTimeScore: number;
+  capacityScore: number;
+  specializationScore: number;
+  reasoning: string;
+}
+
+export interface OptimizationResult {
+  recommended: HospitalScore;
+  fastestRoute?: HospitalScore;
+  maxCapacity?: HospitalScore;
+  evaluatedCount: number;
+  trafficAlerts: string[];
+  recommendationReasoning: string;
+}
+
+

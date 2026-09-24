@@ -8,47 +8,80 @@ const OVERPASS_MIRRORS = [
   "https://overpass.be/api/interpreter",
 ];
 
+// Persistent cache for deterministic hospital capacity metrics
+const hospitalMetricsCache = new Map<string, { beds: number; availableBeds: number; doctorsCount: number }>();
+
+function hashStringToInt(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function getHospitalMetrics(id: string): { beds: number; availableBeds: number; doctorsCount: number } {
+  if (hospitalMetricsCache.has(id)) {
+    return hospitalMetricsCache.get(id)!;
+  }
+
+  const seed = hashStringToInt(id);
+  const totalBeds = (seed % 280) + 70; // Stable 70 to 350 beds
+  const availableBeds = (seed % 24) + 2; // Stable 2 to 26 available beds
+  const doctorsCount = ((seed >> 2) % 40) + 10; // Stable 10 to 50 doctors
+
+  const metrics = { beds: totalBeds, availableBeds, doctorsCount };
+  hospitalMetricsCache.set(id, metrics);
+  return metrics;
+}
+
 /**
  * Generates mock hospitals if the real API fails.
- * This ensures the app is always functional for demo/emergency purposes.
+ * Ensures data consistency across repeated renders.
  */
 function getMockHospitals(lat: number, lng: number): Hospital[] {
-  console.log("Generating mock hospital data as fallback...");
-  return [
+  const mockDefs = [
     {
       id: "mock-1",
       name: "City General Hospital (Mock)",
-      lat: lat + 0.01,
-      lng: lng + 0.01,
+      latOffset: 0.01,
+      lngOffset: 0.01,
       address: "123 Emergency Way",
-      beds: 250,
-      availableBeds: 12,
-      doctorsCount: 45,
       type: "Tertiary Care"
     },
     {
       id: "mock-2",
       name: "St. Jude Medical Center (Mock)",
-      lat: lat - 0.015,
-      lng: lng + 0.005,
+      latOffset: -0.015,
+      lngOffset: 0.005,
       address: "456 Care Blvd",
-      beds: 180,
-      availableBeds: 3,
-      doctorsCount: 28,
       type: "Multi-Specialty"
     },
     {
       id: "mock-3",
       name: "Unity Health Institute (Mock)",
-      lat: lat + 0.005,
-      lng: lng - 0.012,
+      latOffset: 0.005,
+      lngOffset: -0.012,
       address: "789 Wellness St",
-      beds: 400,
-      availableBeds: 0,
-      doctorsCount: 85,
       type: "Trauma Level 1"
     }
   ];
+
+  return mockDefs.map(m => {
+    const metrics = getHospitalMetrics(m.id);
+    return {
+      id: m.id,
+      name: m.name,
+      lat: lat + m.latOffset,
+      lng: lng + m.lngOffset,
+      address: m.address,
+      beds: metrics.beds,
+      availableBeds: metrics.availableBeds,
+      doctorsCount: metrics.doctorsCount,
+      type: m.type
+    };
+  });
 }
 
 export async function fetchNearbyHospitals(lat: number, lng: number, radius: number = 30000): Promise<{ hospitals: Hospital[]; usedMock: boolean }> {
@@ -59,7 +92,6 @@ export async function fetchNearbyHospitals(lat: number, lng: number, radius: num
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout
 
-      // Use POST for better reliability
       const response = await fetch(mirror, {
         method: 'POST',
         body: `data=${encodeURIComponent(query)}`,
@@ -82,7 +114,6 @@ export async function fetchNearbyHospitals(lat: number, lng: number, radius: num
 
       const text = await response.text();
       
-      // Defensive check for XML/HTML in the body even if status is 200
       if (text.trim().startsWith("<?xml") || text.trim().startsWith("<html") || text.trim().startsWith("<!DOCTYPE")) {
         console.info(`Mirror ${mirror} returned XML/HTML instead of JSON`);
         continue;
@@ -102,16 +133,17 @@ export async function fetchNearbyHospitals(lat: number, lng: number, radius: num
       }
 
       const hospitals = data.elements.map((el: any) => {
-        const totalBeds = Math.floor(Math.random() * 300) + 50;
+        const idStr = el.id.toString();
+        const metrics = getHospitalMetrics(idStr);
         return {
-          id: el.id.toString(),
+          id: idStr,
           name: el.tags.name || el.tags["name:en"] || "Unnamed Hospital",
           lat: el.lat || el.center.lat,
           lng: el.lon || el.center.lon,
           address: el.tags["addr:street"] ? `${el.tags["addr:street"]} ${el.tags["addr:housenumber"] || ""}` : undefined,
-          beds: totalBeds,
-          availableBeds: Math.floor(Math.random() * (totalBeds * 0.2)),
-          doctorsCount: Math.floor(Math.random() * 50) + 5,
+          beds: metrics.beds,
+          availableBeds: metrics.availableBeds,
+          doctorsCount: metrics.doctorsCount,
           isSpecialized: !!el.tags.speciality || !!el.tags["healthcare:speciality"],
           type: el.tags.healthcare || "Hospital"
         };
@@ -129,7 +161,6 @@ export async function fetchNearbyHospitals(lat: number, lng: number, radius: num
     }
   }
 
-  // If all mirrors fail, return mock data so the app doesn't break
   console.info('All Overpass mirrors failed; using mock hospital data fallback.');
   return { hospitals: getMockHospitals(lat, lng), usedMock: true };
 }
