@@ -1,54 +1,37 @@
-#  AI-Based Emergency Ambulance Route Planning System
+# AI-Based Emergency Ambulance Route Planning System
 
-An intelligent web-based emergency ambulance routing system designed to reduce ambulance response delays by combining **GPS/location support, emergency reporting, route optimization, simulated traffic conditions, and hospital resource-based selection**.
+An intelligent ambulance routing and emergency management system designed to reduce ambulance delays by combining emergency reporting, GPS-based location, route optimization, traffic simulation, and hospital resource evaluation.
 
-The system helps ambulance drivers and emergency dispatchers identify suitable hospitals and routes based on the emergency type, location, distance, traffic conditions, and simulated hospital availability.
+## Project Overview
 
+Emergency response time is critical in medical emergencies. Ambulances may face delays because of traffic, inefficient route selection, or lack of information about suitable hospitals.
 
-##  Project Overview
+This project provides a software-based ambulance routing system that helps identify a suitable hospital and calculate an efficient route based on:
 
-During medical emergencies, ambulance delays can occur due to:
+- Ambulance location
+- Emergency type
+- Emergency severity
+- Distance
+- Estimated travel time
+- Simulated traffic conditions
+- Hospital availability
+- ICU and bed availability
+- Required medical specialization
 
-- Traffic congestion
-- Poor route selection
-- Lack of information about nearby hospitals
-- Difficulty communicating emergency details
-- Unavailability of suitable hospital resources
+The system is developed as an academic project and uses simulated traffic and hospital resource data for demonstration purposes.
 
-This project provides a centralized web-based solution where an ambulance driver can:
+## Key Features
 
-1. Report an emergency.
-2. Select the emergency type and severity.
-3. Use GPS/location information.
-4. View suitable hospitals.
-5. Calculate optimized routes.
-6. Consider simulated traffic conditions.
-7. Consider simulated hospital resources.
-8. Receive route and hospital recommendations.
-9. Use voice input for emergency reporting.
+### 1. Emergency Reporting
 
-The system is designed as a **prototype/simulation for academic and research purposes**.
+Drivers can report an emergency through the application by selecting:
 
+- Emergency type
+- Emergency severity
+- Patient-related information
+- Emergency location
 
-
-##  Objectives
-
-- Reduce ambulance travel delays.
-- Provide optimized emergency routes.
-- Help drivers quickly report emergencies.
-- Reduce dependency on typing during emergencies.
-- Consider traffic conditions during route selection.
-- Select hospitals based on emergency requirements.
-- Provide a simple and driver-friendly interface.
-- Demonstrate intelligent decision-making for emergency ambulance routing.
-
-
-
-##  Key Features
-
-### Emergency Reporting
-
-Drivers can quickly report an emergency using predefined emergency types such as:
+Supported emergency types include:
 
 - Accident
 - Heart Attack
@@ -61,27 +44,28 @@ Drivers can quickly report an emergency using predefined emergency types such as
 - Severe Burns
 - Other
 
-The system also supports severity levels:
+Severity levels include:
 
 - Critical
 - High
 - Moderate
 - Low
 
-This reduces the need for typing during emergency situations.
+### 2. Voice Input
 
+The emergency reporting form supports browser-based voice input using the Web Speech API.
 
+The system can understand common phrases and map them to the available emergency categories.
 
-###  Voice Emergency Input
-
-The system supports browser-based voice input using the **Web Speech API**.
-
-Drivers can speak simple or imperfect English phrases, for example:
+Examples:
 
 ```text
-"heart pain"
-"accident happened"
-"not breathing"
-"he got stroke"
-"snake bite"
-"breathing problem"
+"heart pain"       -> Heart Attack
+"not breathing"    -> Breathing Difficulty
+"accident happened" -> Accident
+"he got stroke"    -> Stroke
+"person unconscious" -> Unconscious Person
+"heat problem"     -> Heat Stroke
+"snake bite"       -> Snake Bite
+"poison"           -> Poisoning
+"burn"             -> Severe Burns
